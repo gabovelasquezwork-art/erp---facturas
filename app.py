@@ -1,18 +1,3 @@
-"""
-Control de Facturas - Streamlit + Claude (lectura de PDFs con IA)
-
-Pensado para desplegarse en Streamlit Community Cloud.
-Secretos requeridos (Settings > Secrets):
-    ANTHROPIC_API_KEY = "sk-ant-..."
-    [users]
-    ana = "pbkdf2_sha256$600000$<sal>$<hash>"     # generado con generar_hash.py
-
-IMPORTANTE: el disco de Streamlit Community Cloud es temporal. El archivo
-datos_facturas.xlsx se pierde cuando la app se reinicia, se redespliega o
-"se duerme". Descarga el Excel con regularidad (o migra el almacenamiento a
-Google Sheets / una base de datos si necesitas persistencia permanente).
-"""
-
 import base64
 import hashlib
 import hmac
@@ -38,7 +23,7 @@ st.set_page_config(page_title="Control de Facturas", page_icon="🧾", layout="w
 BASE_DIR = Path(__file__).parent
 ARCHIVO_EXCEL = BASE_DIR / "datos_facturas.xlsx"
 
-MODELO_POR_DEFECTO = "claude-haiku-5-5"  # puede sobrescribirse con MODELO en secrets
+MODELO_POR_DEFECTO = "gemini-1.5-flash"
 MAX_MB = 10
 MAX_PAGINAS = 20
 MAX_INTENTOS_LOGIN = 5
@@ -125,36 +110,11 @@ def obtener_api_key():
         return None
 
 
-def obtener_modelo() -> str:
-    try:
-        return st.secrets["MODELO"]
-    except Exception:  # noqa: BLE001
-        return MODELO_POR_DEFECTO
-
-
 def obtener_usuarios() -> dict:
     try:
         return {str(k).strip().lower(): str(v) for k, v in dict(st.secrets["users"]).items()}
     except Exception:  # noqa: BLE001
         return {}
-
-
-def verificar_hash(password: str, almacenado: str) -> bool:
-    """Verifica una contraseña contra 'pbkdf2_sha256$iteraciones$sal$hash'."""
-    try:
-        esquema, iteraciones, sal, hash_hex = almacenado.split("$")
-        if esquema != "pbkdf2_sha256":
-            return False
-        calculado = hashlib.pbkdf2_hmac(
-            "sha256", password.encode("utf-8"), bytes.fromhex(sal), int(iteraciones)
-        )
-        return hmac.compare_digest(calculado.hex(), hash_hex)
-    except (ValueError, AttributeError):
-        return False
-
-
-# Hash falso para que el tiempo de respuesta no revele si el usuario existe.
-_HASH_FALSO = "pbkdf2_sha256$600000$" + "00" * 16 + "$" + "00" * 32
 
 
 def autenticar(usuario: str, password: str) -> bool:
@@ -203,7 +163,6 @@ def pantalla_login():
 # ----------------------------------------------------------------------------
 @st.cache_resource
 def obtener_candado() -> threading.Lock:
-    """Un único candado compartido por todas las sesiones para escribir el Excel."""
     return threading.Lock()
 
 
@@ -221,7 +180,6 @@ def generar_excel(df: pd.DataFrame) -> bytes:
 
 
 def escribir_excel(df: pd.DataFrame) -> None:
-    """Escritura atómica: primero a un temporal y luego reemplaza el original."""
     temporal = ARCHIVO_EXCEL.with_suffix(".tmp")
     temporal.write_bytes(generar_excel(df))
     temporal.replace(ARCHIVO_EXCEL)
@@ -249,21 +207,18 @@ def cargar_datos() -> pd.DataFrame:
         serie = df[col].astype(object)
         valido = serie.isin(opciones[col])
         df[col] = serie.where(valido, None)
-    # Asegura que toda fila tenga un ID único
     sin_id = df["ID"] == ""
     df.loc[sin_id, "ID"] = [uuid.uuid4().hex[:12] for _ in range(int(sin_id.sum()))]
     return df.reset_index(drop=True)
 
 
 def _normalizar(df: pd.DataFrame) -> dict:
-    """Convierte a dict por ID, con NaN -> None, para comparar cambios sin falsos positivos."""
     limpio = df.set_index("ID").astype(object)
     limpio = limpio.where(limpio.notna(), None)
     return limpio.to_dict("index")
 
 
 def guardar_cambios(editado: pd.DataFrame, guardado: pd.DataFrame) -> bool:
-    """Guarda solo las filas modificadas, fusionándolas con lo que haya en disco."""
     nuevo, previo = _normalizar(editado), _normalizar(guardado)
     cambiados = [i for i, fila in nuevo.items() if i in previo and fila != previo[i]]
     if not cambiados:
@@ -294,13 +249,8 @@ def eliminar_filas(ids: list[str]) -> None:
 
 
 # ----------------------------------------------------------------------------
-# EXTRACCIÓN CON IA
+# EXTRACCIÓN CON IA (GEMINI)
 # ----------------------------------------------------------------------------
-@st.cache_resource
-def obtener_cliente(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key)
-
-
 def validar_pdf(datos: bytes) -> None:
     if len(datos) > MAX_MB * 1024 * 1024:
         raise ValueError(f"supera el tamaño máximo de {MAX_MB} MB")
@@ -308,7 +258,7 @@ def validar_pdf(datos: bytes) -> None:
         lector = PdfReader(BytesIO(datos))
         cifrado = lector.is_encrypted
         paginas = len(lector.pages)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise ValueError("no es un PDF válido o está dañado") from e
     if cifrado:
         raise ValueError("está protegido con contraseña")
@@ -319,7 +269,6 @@ def validar_pdf(datos: bytes) -> None:
 
 
 def a_numero(valor):
-    """Convierte lo que devuelva la IA a float (o None)."""
     if valor is None or valor == "":
         return None
     if isinstance(valor, (int, float)):
@@ -356,40 +305,10 @@ def extraer_factura(datos_pdf: bytes, nombre: str, usuario: str) -> dict:
     texto = respuesta.text
     coincidencia = re.search(r"\{.*\}", texto, re.DOTALL)
     if not coincidencia:
-        raise ValueError("La IA no devolvió un resultado interpretable.")
+        raise ValueError("La IA no devolvió un resultado interpretable")
     d = json.loads(coincidencia.group(0))
 
     return {
-        "ID": uuid.uuid4().hex[:12],
-        "Archivo": nombre,
-        "Fecha": str(d.get("fecha") or ""),
-        "Nº Factura": str(d.get("numero_factura") or ""),
-        "Proveedor": str(d.get("proveedor") or ""),
-        "RIF": str(d.get("rif") or ""),
-        "Descripción": str(d.get("descripcion") or ""),
-        "Subtotal": a_numero(d.get("subtotal")),
-        "IVA": a_numero(d.get("iva")),
-        "Total": a_numero(d.get("total")),
-        "Clasificación": None,
-        "Alojamiento": None,
-        "Cargado por": usuario,
-        "Fecha de carga": datetime.now().strftime("%d/%m/%Y %H:%M"),
-    }
-        "ID": uuid.uuid4().hex[:12],
-        "Archivo": nombre,
-        "Fecha": str(d.get("fecha") or ""),
-        "Nº Factura": str(d.get("numero_factura") or ""),
-        "Proveedor": str(d.get("proveedor") or ""),
-        "RIF": str(d.get("rif") or ""),
-        "Descripción": str(d.get("descripcion") or ""),
-        "Subtotal": a_numero(d.get("subtotal")),
-        "IVA": a_numero(d.get("iva")),
-        "Total": a_numero(d.get("total")),
-        "Clasificación": None,
-        "Alojamiento": None,
-        "Cargado por": usuario,
-        "Fecha de carga": datetime.now().strftime("%d/%m/%Y %H:%M"),
-    }
         "ID": uuid.uuid4().hex[:12],
         "Archivo": nombre,
         "Fecha": str(d.get("fecha") or ""),
@@ -414,7 +333,6 @@ def _clave_duplicado(fila) -> tuple:
 
 
 def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
-    """Procesa los PDFs subidos. Devuelve una lista de mensajes (tipo, texto)."""
     mensajes: list[tuple[str, str]] = []
     existentes = cargar_datos()
     vistas = {
@@ -444,8 +362,6 @@ def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
                 mensajes.append(("error", "La API Key configurada no es válida. Avisa al administrador."))
                 break
             mensajes.append(("error", f"**{archivo.name}**: {e}"))
-        except Exception as e:  # noqa: BLE001
-            mensajes.append(("error", f"**{archivo.name}**: {e}"))
         barra.progress(i / len(archivos), text=f"Procesando {i}/{len(archivos)}")
     barra.empty()
 
@@ -460,8 +376,8 @@ def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
 # ----------------------------------------------------------------------------
 def recargar_desde_disco() -> None:
     df = cargar_datos()
-    st.session_state["df"] = df               # lo que recibe el editor (se mantiene estable)
-    st.session_state["guardado"] = df.copy()  # última versión conocida en disco
+    st.session_state["df"] = df
+    st.session_state["guardado"] = df.copy()
     st.session_state["version"] = st.session_state.get("version", 0) + 1
 
 
@@ -483,7 +399,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---- Login ------------------------------------------------------------------
 if "usuario" not in st.session_state:
     pantalla_login()
     st.stop()
@@ -498,7 +413,6 @@ if "df" not in st.session_state:
     recargar_desde_disco()
 st.session_state.setdefault("uploader_key", 0)
 
-# ---- Barra lateral ----------------------------------------------------------
 with st.sidebar:
     st.markdown(f"👤 Sesión: **{usuario_actual}**")
     if st.button("🔄 Actualizar datos"):
@@ -517,7 +431,6 @@ st.title("🧾 Control de Facturas")
 
 tab_cargar, tab_tabla = st.tabs(["📤 Cargar facturas", "📊 Facturas"])
 
-# ---- Pestaña 1: carga -------------------------------------------------------
 with tab_cargar:
     for tipo, texto in st.session_state.pop("resultado_carga", []):
         getattr(st, tipo)(texto)
@@ -536,7 +449,6 @@ with tab_cargar:
         recargar_desde_disco()
         st.rerun()
 
-# ---- Pestaña 2: tabla -------------------------------------------------------
 with tab_tabla:
     if st.session_state["df"].empty:
         st.info("Todavía no hay facturas. Súbelas en la pestaña **Cargar facturas**.")
@@ -577,18 +489,15 @@ with tab_tabla:
             },
         )
 
-        # Guardado automático (solo filas modificadas)
         if guardar_cambios(editado, st.session_state["guardado"]):
             st.session_state["guardado"] = editado.copy()
 
-        # Resumen
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Facturas", len(editado))
         c2.metric("Subtotal", f"{editado['Subtotal'].sum():,.2f}")
         c3.metric("IVA", f"{editado['IVA'].sum():,.2f}")
         c4.metric("Total", f"{editado['Total'].sum():,.2f}")
 
-        # Avisos de calidad de datos
         avisos = []
         for _, f in editado.iterrows():
             motivos = []
@@ -611,7 +520,6 @@ with tab_tabla:
                 for a in avisos:
                     st.markdown(f"- {a}")
 
-        # Descarga del Excel consolidado (siempre con lo último guardado)
         st.download_button(
             "⬇️ Descargar Excel (.xlsx)",
             data=generar_excel(cargar_datos().drop(columns="ID")),
@@ -620,7 +528,6 @@ with tab_tabla:
             type="primary",
         )
 
-        # Eliminación de facturas (por errores de carga)
         with st.expander("🗑️ Eliminar facturas"):
             etiquetas = {
                 f"{r['Proveedor'] or 'Sin proveedor'} · {r['Nº Factura'] or 's/n'} · {r['Archivo']} [{r['ID'][:4]}]": r["ID"]
