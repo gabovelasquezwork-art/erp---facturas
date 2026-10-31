@@ -300,6 +300,9 @@ def a_numero(valor):
 def obtener_modelo_disponible():
     api_key = obtener_api_key()
     genai.configure(api_key=api_key)
+    return genai.GenerativeModel("gemini-3.8-flash")
+    api_key = obtener_api_key()
+    genai.configure(api_key=api_key)
     
     # Buscar automáticamente un modelo flash disponible compatible con contenido multimodal
     try:
