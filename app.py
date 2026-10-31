@@ -476,7 +476,7 @@ if "usuario" not in st.session_state:
 usuario_actual = st.session_state["usuario"]
 
 if not obtener_api_key():
-    st.error("Falta `ANTHROPIC_API_KEY` en los Secrets de la app. Avisa al administrador.")
+    st.error("Falta `GEMINI_API_KEY` en los Secrets de la app. Avisa al administrador.")
     st.stop()
 
 if "df" not in st.session_state:
