@@ -1,3 +1,13 @@
+"""
+Control de Facturas - Streamlit + Google Gemini (lectura de PDFs e Imágenes con IA)
+
+Pensado para desplegarse en Streamlit Community Cloud.
+Secretos requeridos (Settings > Secrets):
+    GEMINI_API_KEY = "AIzaSy..."
+    [users]
+    usuario = "contraseña"
+"""
+
 import base64
 import hashlib
 import hmac
@@ -75,7 +85,7 @@ COLUMNAS_EDITABLES = [
     "Subtotal", "IVA", "Total", "Clasificación", "Alojamiento",
 ]
 
-PROMPT = """Eres un asistente experto en leer facturas. Analiza la factura adjunta
+PROMPT = """Eres un asistente experto en leer facturas. Analiza el documento o imagen adjunta
 y devuelve ÚNICAMENTE un objeto JSON válido (sin texto adicional y sin ```), con
 exactamente estas claves:
 
@@ -249,17 +259,23 @@ def eliminar_filas(ids: list[str]) -> None:
 
 
 # ----------------------------------------------------------------------------
-# EXTRACCIÓN CON IA (GEMINI)
+# EXTRACCIÓN CON IA (GEMINI - SOPORTA PDF E IMÁGENES)
 # ----------------------------------------------------------------------------
-def validar_pdf(datos: bytes) -> None:
+def validar_archivo(datos: bytes, nombre: str) -> None:
     if len(datos) > MAX_MB * 1024 * 1024:
         raise ValueError(f"supera el tamaño máximo de {MAX_MB} MB")
+    
+    nombre_lower = nombre.lower()
+    if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return  # Es una imagen válida
+    
+    # Validar si es PDF
     try:
         lector = PdfReader(BytesIO(datos))
         cifrado = lector.is_encrypted
         paginas = len(lector.pages)
     except Exception as e:
-        raise ValueError("no es un PDF válido o está dañado") from e
+        raise ValueError("no es un archivo válido o está dañado") from e
     if cifrado:
         raise ValueError("está protegido con contraseña")
     if paginas == 0:
@@ -289,16 +305,28 @@ def a_numero(valor):
         return None
 
 
-def extraer_factura(datos_pdf: bytes, nombre: str, usuario: str) -> dict:
+def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
     api_key = obtener_api_key()
     if not api_key:
         raise ValueError("La API Key de Gemini no está configurada.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-pro")
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    nombre_lower = nombre.lower()
+    if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+        if nombre_lower.endswith(".png"):
+            mime_type = "image/png"
+        elif nombre_lower.endswith(".webp"):
+            mime_type = "image/webp"
+        else:
+            mime_type = "image/jpeg"
+        contenido_ia = {"mime_type": mime_type, "data": datos_archivo}
+    else:
+        contenido_ia = {"mime_type": "application/pdf", "data": datos_archivo}
 
     respuesta = model.generate_content([
-        {"mime_type": "application/pdf", "data": datos_pdf},
+        contenido_ia,
         PROMPT
     ])
 
@@ -342,11 +370,11 @@ def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
     }
     nuevas: list[dict] = []
 
-    barra = st.progress(0.0, text="Procesando facturas...")
+    barra = st.progress(0.0, text="Procesando archivos...")
     for i, archivo in enumerate(archivos, start=1):
         try:
             datos = archivo.getvalue()
-            validar_pdf(datos)
+            validar_archivo(datos, archivo.name)
             fila = extraer_factura(datos, archivo.name, usuario)
             clave = _clave_duplicado(fila)
             if all(clave) and clave in vistas:
@@ -367,7 +395,7 @@ def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
 
     if nuevas:
         agregar_filas(nuevas)
-        mensajes.insert(0, ("success", f"{len(nuevas)} factura(s) procesada(s). Revisa los datos en la pestaña **Facturas**."))
+        mensajes.insert(0, ("success", f"{len(nuevas)} documento(s) procesado(s). Revisa los datos en la pestaña **Facturas**."))
     return mensajes
 
 
@@ -435,13 +463,13 @@ with tab_cargar:
     for tipo, texto in st.session_state.pop("resultado_carga", []):
         getattr(st, tipo)(texto)
 
-    st.write("Sube una o varias facturas en PDF. La IA extraerá los datos automáticamente.")
+    st.write("Sube facturas en PDF o imágenes (JPG, PNG). La IA extraerá los datos automáticamente.")
     archivos = st.file_uploader(
-        "Selecciona los PDFs",
-        type=["pdf"],
+        "Selecciona los archivos",
+        type=["pdf", "jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state['uploader_key']}",
-        help=f"Máximo {MAX_MB} MB y {MAX_PAGINAS} páginas por archivo.",
+        help=f"Máximo {MAX_MB} MB por archivo.",
     )
     if st.button("Procesar facturas", type="primary", disabled=not archivos):
         st.session_state["resultado_carga"] = procesar_archivos(archivos, usuario_actual)
