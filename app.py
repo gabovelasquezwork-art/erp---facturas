@@ -424,12 +424,11 @@ def procesar_archivos(archivos, usuario: str) -> list[tuple[str, str]]:
                 if all(clave):
                     vistas.add(clave)
                 nuevas.append(fila)
-        except anthropic.AuthenticationError:
-            mensajes.append(("error", "La API Key configurada no es válida. Avisa al administrador."))
-            break
-        except anthropic.RateLimitError:
-            mensajes.append(("error", f"**{archivo.name}**: límite de uso de la API alcanzado. Intenta más tarde."))
-            break
+        except Exception as e:
+            if "API key" in str(e) or "API_KEY" in str(e):
+                mensajes.append(("error", "La API Key configurada no es válida. Avisa al administrador."))
+                break
+            mensajes.append(("error", f"**{archivo.name}**: {e}"))
         except Exception as e:  # noqa: BLE001
             mensajes.append(("error", f"**{archivo.name}**: {e}"))
         barra.progress(i / len(archivos), text=f"Procesando {i}/{len(archivos)}")
