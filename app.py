@@ -390,6 +390,21 @@ def extraer_factura(datos_pdf: bytes, nombre: str, usuario: str) -> dict:
         "Cargado por": usuario,
         "Fecha de carga": datetime.now().strftime("%d/%m/%Y %H:%M"),
     }
+        "ID": uuid.uuid4().hex[:12],
+        "Archivo": nombre,
+        "Fecha": str(d.get("fecha") or ""),
+        "Nº Factura": str(d.get("numero_factura") or ""),
+        "Proveedor": str(d.get("proveedor") or ""),
+        "RIF": str(d.get("rif") or ""),
+        "Descripción": str(d.get("descripcion") or ""),
+        "Subtotal": a_numero(d.get("subtotal")),
+        "IVA": a_numero(d.get("iva")),
+        "Total": a_numero(d.get("total")),
+        "Clasificación": None,
+        "Alojamiento": None,
+        "Cargado por": usuario,
+        "Fecha de carga": datetime.now().strftime("%d/%m/%Y %H:%M"),
+    }
 
 
 def _clave_duplicado(fila) -> tuple:
