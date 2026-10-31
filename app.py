@@ -1,11 +1,5 @@
 """
 Control de Facturas - Streamlit + Google Gemini (lectura de PDFs e Imágenes con IA)
-
-Pensado para desplegarse en Streamlit Community Cloud.
-Secretos requeridos (Settings > Secrets):
-    GEMINI_API_KEY = "AIzaSy..."
-    [users]
-    usuario = "contraseña"
 """
 
 import base64
@@ -33,7 +27,7 @@ st.set_page_config(page_title="Control de Facturas", page_icon="🧾", layout="w
 BASE_DIR = Path(__file__).parent
 ARCHIVO_EXCEL = BASE_DIR / "datos_facturas.xlsx"
 
-MODELO_POR_DEFECTO = "gemini-3.8-flash"
+MODELO_POR_DEFECTO = "gemini-1.5-flash"
 MAX_MB = 10
 MAX_PAGINAS = 20
 MAX_INTENTOS_LOGIN = 5
@@ -269,7 +263,6 @@ def validar_archivo(datos: bytes, nombre: str) -> None:
     if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
         return  # Es una imagen válida
     
-    # Validar si es PDF
     try:
         lector = PdfReader(BytesIO(datos))
         cifrado = lector.is_encrypted
@@ -305,13 +298,13 @@ def a_numero(valor):
         return None
 
 
-model = genai.GenerativeModel("gemini-3.8-flash")
+def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
     api_key = obtener_api_key()
     if not api_key:
         raise ValueError("La API Key de Gemini no está configurada.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel(MODELO_POR_DEFECTO)
 
     nombre_lower = nombre.lower()
     if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
