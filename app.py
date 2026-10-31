@@ -158,11 +158,11 @@ _HASH_FALSO = "pbkdf2_sha256$600000$" + "00" * 16 + "$" + "00" * 32
 
 
 def autenticar(usuario: str, password: str) -> bool:
-    almacenado = obtener_usuarios().get(usuario.strip().lower())
+    usuarios = obtener_usuarios()
+    almacenado = usuarios.get(usuario.strip().lower())
     if almacenado is None:
-        verificar_hash(password, _HASH_FALSO)
         return False
-    return verificar_hash(password, almacenado)
+    return str(almacenado) == str(password)
 
 
 def pantalla_login():
