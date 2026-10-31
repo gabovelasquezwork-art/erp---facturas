@@ -25,7 +25,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
-import anthropic
+import google.generativeai as genai
 import pandas as pd
 import streamlit as st
 from pypdf import PdfReader
@@ -120,7 +120,7 @@ Reglas:
 # ----------------------------------------------------------------------------
 def obtener_api_key():
     try:
-        return st.secrets["ANTHROPIC_API_KEY"]
+        return st.secrets["GEMINI_API_KEY"]
     except Exception:  # noqa: BLE001
         return None
 
