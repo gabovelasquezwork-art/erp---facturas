@@ -305,7 +305,7 @@ def a_numero(valor):
         return None
 
 
-def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
+model = genai.GenerativeModel("gemini-3.8-flash")
     api_key = obtener_api_key()
     if not api_key:
         raise ValueError("La API Key de Gemini no está configurada.")
