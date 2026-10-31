@@ -311,7 +311,7 @@ def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
         raise ValueError("La API Key de Gemini no está configurada.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     nombre_lower = nombre.lower()
     if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
