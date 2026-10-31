@@ -1,5 +1,5 @@
 """
-Control de Facturas - Streamlit + Google Gemini (lectura de PDFs e Imágenes con IA)
+Control de Facturas - Streamlit + Google Gemini
 """
 
 import base64
@@ -27,7 +27,6 @@ st.set_page_config(page_title="Control de Facturas", page_icon="🧾", layout="w
 BASE_DIR = Path(__file__).parent
 ARCHIVO_EXCEL = BASE_DIR / "datos_facturas.xlsx"
 
-MODELO_POR_DEFECTO = "gemini-1.5-flash"
 MAX_MB = 10
 MAX_PAGINAS = 20
 MAX_INTENTOS_LOGIN = 5
@@ -253,7 +252,7 @@ def eliminar_filas(ids: list[str]) -> None:
 
 
 # ----------------------------------------------------------------------------
-# EXTRACCIÓN CON IA (GEMINI - SOPORTA PDF E IMÁGENES)
+# EXTRACCIÓN CON IA (GEMINI - DINÁMICO)
 # ----------------------------------------------------------------------------
 def validar_archivo(datos: bytes, nombre: str) -> None:
     if len(datos) > MAX_MB * 1024 * 1024:
@@ -261,7 +260,7 @@ def validar_archivo(datos: bytes, nombre: str) -> None:
     
     nombre_lower = nombre.lower()
     if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
-        return  # Es una imagen válida
+        return  
     
     try:
         lector = PdfReader(BytesIO(datos))
@@ -298,13 +297,28 @@ def a_numero(valor):
         return None
 
 
+def obtener_modelo_disponible():
+    api_key = obtener_api_key()
+    genai.configure(api_key=api_key)
+    
+    # Buscar automáticamente un modelo flash disponible compatible con contenido multimodal
+    try:
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods and "flash" in m.name.lower():
+                return genai.GenerativeModel(m.name)
+    except Exception:
+        pass
+    
+    # Fallback seguro si falla el listado
+    return genai.GenerativeModel("gemini-1.5-flash")
+
+
 def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
     api_key = obtener_api_key()
     if not api_key:
-        raise ValueError("La API Key de Gemini no está configurada.")
+        raise ValueError("La API Key de Gemini não está configurada.")
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(MODELO_POR_DEFECTO)
+    model = obtener_modelo_disponible()
 
     nombre_lower = nombre.lower()
     if nombre_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
