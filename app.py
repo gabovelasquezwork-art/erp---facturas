@@ -341,36 +341,40 @@ def a_numero(valor):
 
 
 def extraer_factura(datos_pdf: bytes, nombre: str, usuario: str) -> dict:
-    cliente = obtener_cliente(obtener_api_key())
-    pdf_b64 = base64.standard_b64encode(datos_pdf).decode("utf-8")
+    api_key = obtener_api_key()
+    if not api_key:
+        raise ValueError("La API Key de Gemini no está configurada.")
 
-    respuesta = cliente.messages.create(
-        model=obtener_modelo(),
-        max_tokens=1000,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64,
-                        },
-                    },
-                    {"type": "text", "text": PROMPT},
-                ],
-            }
-        ],
-    )
-    texto = "".join(b.text for b in respuesta.content if b.type == "text")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    respuesta = model.generate_content([
+        {"mime_type": "application/pdf", "data": datos_pdf},
+        PROMPT
+    ])
+
+    texto = respuesta.text
     coincidencia = re.search(r"\{.*\}", texto, re.DOTALL)
     if not coincidencia:
-        raise ValueError("la IA no devolvió un resultado interpretable")
+        raise ValueError("La IA no devolvió un resultado interpretable.")
     d = json.loads(coincidencia.group(0))
 
     return {
+        "ID": uuid.uuid4().hex[:12],
+        "Archivo": nombre,
+        "Fecha": str(d.get("fecha") or ""),
+        "Nº Factura": str(d.get("numero_factura") or ""),
+        "Proveedor": str(d.get("proveedor") or ""),
+        "RIF": str(d.get("rif") or ""),
+        "Descripción": str(d.get("descripcion") or ""),
+        "Subtotal": a_numero(d.get("subtotal")),
+        "IVA": a_numero(d.get("iva")),
+        "Total": a_numero(d.get("total")),
+        "Clasificación": None,
+        "Alojamiento": None,
+        "Cargado por": usuario,
+        "Fecha de carga": datetime.now().strftime("%d/%m/%Y %H:%M"),
+    }
         "ID": uuid.uuid4().hex[:12],
         "Archivo": nombre,
         "Fecha": str(d.get("fecha") or ""),
