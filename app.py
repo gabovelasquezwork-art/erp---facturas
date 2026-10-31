@@ -33,7 +33,7 @@ st.set_page_config(page_title="Control de Facturas", page_icon="🧾", layout="w
 BASE_DIR = Path(__file__).parent
 ARCHIVO_EXCEL = BASE_DIR / "datos_facturas.xlsx"
 
-MODELO_POR_DEFECTO = "gemini-1.5-flash"
+MODELO_POR_DEFECTO = "gemini-3.8-flash"
 MAX_MB = 10
 MAX_PAGINAS = 20
 MAX_INTENTOS_LOGIN = 5
