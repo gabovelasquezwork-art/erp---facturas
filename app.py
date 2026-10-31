@@ -295,7 +295,7 @@ def extraer_factura(datos_pdf: bytes, nombre: str, usuario: str) -> dict:
         raise ValueError("La API Key de Gemini no está configurada.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-pro")
 
     respuesta = model.generate_content([
         {"mime_type": "application/pdf", "data": datos_pdf},
