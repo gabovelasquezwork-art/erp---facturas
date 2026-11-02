@@ -48,11 +48,11 @@ else:
         st.session_state.usuario_actual = ""
         st.rerun()
 
-    st.title("🧾 Control de Facturas y Gastos con IA")
-    st.write("Sube o fotografía tu factura para leerla automáticamente y sincronizarla con Google Sheets.")
+    st.title("🧾 Control de Facturas y Gastos")
+    st.write("Sistema de digitalización, escaneo inteligente y registro automatizado en Google Sheets.")
 
     def enviar_a_google_sheets(datos_dict):
-        """Envía los datos procesados al Webhook de Google Apps Script"""
+        """Envía los datos de la matriz al Webhook de Google Apps Script"""
         try:
             response = requests.post(WEBHOOK_URL, json=datos_dict)
             if response.status_code == 200:
@@ -64,111 +64,128 @@ else:
             st.error(f"Error de conexión con el Webhook: {e}")
             return False
 
-    # --- SECCIÓN DE LECTURA AUTOMÁTICA CON GEMINI ---
-    st.subheader("🤖 Extracción Automática de Factura")
-    archivo_subido = st.file_uploader("Sube la imagen o PDF de la factura", type=["jpg", "jpeg", "png", "pdf"])
-
-    # Inicializar variables de estado para el formulario
-    if "datos_extraidos" not in st.session_state:
-        st.session_state.datos_extraidos = {
+    # --- INICIALIZAR ESTADOS DE LA MATRIZ DE CAMPOS ---
+    if "datos_factura" not in st.session_state:
+        st.session_state.datos_factura = {
             "numero_factura": "",
             "proveedor": "",
             "rif": "",
-            "fecha": datetime.today(),
+            "fecha": str(datetime.today().strftime("%Y-%m-%d")),
             "subtotal": 0.0,
             "iva": 0.0,
             "total": 0.0,
             "clasificacion": "Mantenimiento",
-            "alojamiento": "General / Operaciones",
+            "alojamiento": "",
+            "estatus": "No refacturar",
             "descripcion": ""
         }
 
+    # --- SECCIÓN DE ESCANEO CON GEMINI ---
+    st.subheader("📤 Carga y Escaneo de Factura")
+    archivo_subido = st.file_uploader("Sube la imagen o PDF de la factura para procesarla", type=["jpg", "jpeg", "png", "pdf"])
+
     if archivo_subido is not None:
-        st.image(archivo_subido, caption="Factura cargada", width=300)
-        if st.button("🔍 Analizar Factura con IA"):
-            with st.spinner("Leyendo factura y extrayendo datos..."):
-                try:
-                    imagen = Image.open(archivo_subido)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    prompt = """
-                    Analiza esta factura y extrae la siguiente información en formato JSON estricto:
-                    - "numero_factura": número de factura (string)
-                    - "proveedor": nombre del proveedor o comercio (string)
-                    - "rif": RIF o identificación fiscal (string)
-                    - "fecha": fecha de la factura en formato YYYY-MM-DD (string, si no se encuentra usa la actual)
-                    - "subtotal": subtotal numérico (float)
-                    - "iva": impuesto o IVA numérico (float)
-                    - "total": monto total numérico (float)
-                    - "descripcion": breve resumen de los items o servicios (string)
-                    Responde únicamente con el objeto JSON, sin texto adicional ni bloques de código markdown si es posible, o limpio.
-                    """
-                    response = model.generate_content([prompt, imagen])
-                    texto_respuesta = response.text.strip()
-                    
-                    # Limpiar formato markdown si Gemini lo incluye
-                    if texto_respuesta.startswith("```json"):
-                        texto_respuesta = texto_respuesta[7:-3].strip()
-                    elif texto_respuesta.startswith("```"):
-                        texto_respuesta = texto_respuesta[3:-3].strip()
+        col_img, col_btn = st.columns([1, 2])
+        with col_img:
+            st.image(archivo_subido, caption="Factura Cargada", width=250)
+        with col_btn:
+            st.info("El archivo está listo para ser escaneado por el sistema.")
+            if st.button("🚀 Escanear Factura y Llenar Matriz", type="primary"):
+                with st.spinner("Escaneando documento y extrayendo información..."):
+                    try:
+                        imagen = Image.open(archivo_subido)
+                        model = genai.GenerativeModel('gemini-1.5-flash')
+                        prompt = """
+                        Analiza esta factura en detalle y extrae la información exacta en formato JSON puro con estas claves:
+                        - "numero_factura": número de la factura (string)
+                        - "proveedor": nombre del comercio o proveedor (string)
+                        - "rif": RIF o identificación fiscal (string)
+                        - "fecha": fecha de la factura en formato YYYY-MM-DD (string)
+                        - "subtotal": subtotal numérico (float)
+                        - "iva": impuesto o IVA numérico (float)
+                        - "total": monto total numérico (float)
+                        - "descripcion": breve detalle de los conceptos o productos (string)
+                        Devuelve exclusivamente el objeto JSON sin texto adicional.
+                        """
+                        response = model.generate_content([prompt, imagen])
+                        texto_res = response.text.strip()
+                        
+                        if texto_res.startswith("```json"):
+                            texto_res = texto_res[7:-3].strip()
+                        elif texto_res.startswith("```"):
+                            texto_res = texto_res[3:-3].strip()
 
-                    datos_json = json.loads(texto_respuesta)
-                    
-                    # Guardar en session_state para rellenar el formulario
-                    st.session_state.datos_extraidos["numero_factura"] = datos_json.get("numero_factura", "")
-                    st.session_state.datos_extraidos["proveedor"] = datos_json.get("proveedor", "")
-                    st.session_state.datos_extraidos["rif"] = datos_json.get("rif", "")
-                    st.session_state.datos_extraidos["subtotal"] = float(datos_json.get("subtotal", 0.0))
-                    st.session_state.datos_extraidos["iva"] = float(datos_json.get("iva", 0.0))
-                    st.session_state.datos_extraidos["total"] = float(datos_json.get("total", 0.0))
-                    st.session_state.datos_extraidos["descripcion"] = datos_json.get("descripcion", "")
-                    
-                    st.success("¡Factura leída con éxito! Revisa los campos abajo y guarda.")
-                except Exception as e:
-                    st.error(f"No se pudo procesar automáticamente la factura: {e}")
+                        resultado_json = json.loads(texto_res)
+                        
+                        # Actualizar la matriz de campos en session_state
+                        st.session_state.datos_factura["numero_factura"] = resultado_json.get("numero_factura", "")
+                        st.session_state.datos_factura["proveedor"] = resultado_json.get("proveedor", "")
+                        st.session_state.datos_factura["rif"] = resultado_json.get("rif", "")
+                        st.session_state.datos_factura["fecha"] = resultado_json.get("fecha", str(datetime.today().strftime("%Y-%m-%d")))
+                        st.session_state.datos_factura["subtotal"] = float(resultado_json.get("subtotal", 0.0))
+                        st.session_state.datos_factura["iva"] = float(resultado_json.get("iva", 0.0))
+                        st.session_state.datos_factura["total"] = float(resultado_json.get("total", 0.0))
+                        st.session_state.datos_factura["descripcion"] = resultado_json.get("descripcion", "")
+                        
+                        st.success("¡Factura escaneada con éxito! La matriz de campos se ha rellenado automáticamente.")
+                    except Exception as e:
+                        st.error(f"Error al escanear el documento con IA: {e}")
 
-    # --- FORMULARIO DE REVISIÓN Y REGISTRO ---
+    # --- MATRIZ DE CAMPOS DETALLADOS ---
     st.markdown("---")
-    with st.form("form_factura_editable"):
-        st.subheader("📝 Detalle y Registro de la Factura")
+    st.subheader("📋 Matriz de Datos de la Factura")
+    st.write("Verifica, ajusta o completa los campos antes de almacenarlos permanentemente.")
+
+    with st.form("form_matriz_factura"):
+        c1, c2, c3 = st.columns(3)
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            numero_factura = st.text_input("Número de Factura", value=st.session_state.datos_extraidos["numero_factura"])
-            proveedor = st.text_input("Proveedor", value=st.session_state.datos_extraidos["proveedor"])
-            rif = st.text_input("RIF / Identificación", value=st.session_state.datos_extraidos["rif"])
-            fecha_factura = st.date_input("Fecha de la Factura", value=datetime.today())
+        with c1:
+            numero_factura = st.text_input("Número de Factura", value=st.session_state.datos_factura["numero_factura"])
+            proveedor = st.text_input("Proveedor", value=st.session_state.datos_factura["proveedor"])
+            rif = st.text_input("RIF / Identificación", value=st.session_state.datos_factura["rif"])
+            alojamiento = st.text_input("Alojamiento / Propiedad", value=st.session_state.datos_factura["alojamiento"], placeholder="Ej. Apto 3B, Villa Sol...")
             
-        with col2:
-            alojamiento = st.selectbox("Alojamiento / Propiedad", [
-                "General / Operaciones",
-                "Propiedad España - Apto 1", 
-                "Propiedad España - Apto 2", 
-                "Propiedad España - Villa Principal"
-            ])
+        with c2:
+            fecha_str = st.session_state.datos_factura["fecha"]
+            try:
+                val_fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            except:
+                val_fecha = datetime.today().date()
+            
+            fecha_factura = st.date_input("Fecha de Emisión", value=val_fecha)
+            
             clasificacion = st.selectbox("Clasificación del Gasto", [
                 "Mantenimiento", 
                 "Logística y Montaje", 
                 "Insumos Operativos", 
                 "Servicios", 
                 "Otro"
-            ])
-            subtotal = st.number_input("Subtotal", min_value=0.0, value=st.session_state.datos_extraidos["subtotal"], format="%.2f")
-            iva = st.number_input("IVA / Impuestos", min_value=0.0, value=st.session_state.datos_extraidos["iva"], format="%.2f")
+            ], index=0)
+            
+            estatus = st.selectbox("Estatus de la Factura", [
+                "No refacturar",
+                "Refacturar",
+                "Refacturar/herramientas"
+            ], index=0)
+
+        with c3:
+            subtotal = st.number_input("Subtotal", min_value=0.0, value=float(st.session_state.datos_factura["subtotal"]), format="%.2f")
+            iva = st.number_input("IVA / Impuestos", min_value=0.0, value=float(st.session_state.datos_factura["iva"]), format="%.2f")
+            
+            # Cálculo automático del total basado en los campos de la matriz
+            total_calculado = subtotal + iva
+            st.metric("Total Calculado", f"${total_calculado:.2f}")
+
+        descripcion = st.text_area("Descripción o Concepto del Gasto", value=st.session_state.datos_factura["descripcion"])
         
-        total_calculado = subtotal + iva
-        st.info(f"**Monto Total:** ${total_calculado:.2f}")
+        guardar_btn = st.form_submit_button("💾 Guardar Factura en Google Sheets", type="primary")
         
-        descripcion = st.text_area("Descripción detallada", value=st.session_state.datos_extraidos["descripcion"])
-        
-        submitted = st.form_submit_button("Guardar Factura en Google Sheets")
-        
-        if submitted:
+        if guardar_btn:
             if not numero_factura or not proveedor:
-                st.warning("Por favor verifica el Número de Factura y el Proveedor.")
+                st.warning("Por favor asegúrate de que el Número de Factura y el Proveedor no estén vacíos.")
             else:
-                # Estructura de datos lista para enviar al Webhook
-                datos_factura = {
+                # Estructura final empaquetada para el Webhook
+                payload = {
                     "id": f"FAC-{int(datetime.now().timestamp())}",
                     "archivo": archivo_subido.name if archivo_subido else "N/A",
                     "fecha": str(fecha_factura),
@@ -181,12 +198,13 @@ else:
                     "total": total_calculado,
                     "clasificacion": clasificacion,
                     "alojamiento": alojamiento,
+                    "estatus": estatus,
                     "cargado_por": st.session_state.usuario_actual,
                     "fecha_carga": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 }
                 
-                with st.spinner("Sincronizando con Google Sheets..."):
-                    if enviar_a_google_sheets(datos_factura):
-                        st.success("¡Factura guardada correctamente en la hoja de cálculo!")
+                with st.spinner("Guardando en la base de datos de Google Sheets..."):
+                    if enviar_a_google_sheets(payload):
+                        st.success("¡Factura registrada y guardada exitosamente en la nube!")
                     else:
-                        st.error("Hubo un problema al enviar los datos a la nube.")
+                        st.error("No se pudo completar el almacenamiento en la nube.")
