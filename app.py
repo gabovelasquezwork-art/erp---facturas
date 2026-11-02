@@ -113,3 +113,10 @@ def obtener_api_key():
         return "".join(key.split())
     except Exception:
         return None
+
+@st.cache_resource
+def conectar_gsheets():
+    try:
+        return gspread.service_account_from_dict(dict(st.secrets["connections"]["gsheets"]))
+    except Exception:
+        return None
