@@ -114,19 +114,18 @@ def obtener_api_key():
         return None
 
 @st.cache_resource
-@st.cache_resource
 def conectar_gsheets():
     try:
         sec = dict(st.secrets["gcp_service_account"])
         
-        # Limpieza ultra robusta: procesa la llave línea por línea eliminando espacios fantasma o caracteres ocultos
+        # Limpieza infalible de la llave privada
         pk = sec.get("private_key", "")
         if "\\n" in pk:
             pk = pk.replace("\\n", "\n")
             
-        # Limpia cada línea individualmente y las reconstruye de forma impecable
-        lineas_limpias = [line.strip() for line in pk.splitlines() if line.strip()]
-        sec["private_key"] = "\n".join(lineas_limpias) + "\n"
+        # Asegura que las líneas internas tengan formato PEM exacto sin espacios ocultos
+        lineas = [l.strip() for l in pk.splitlines() if l.strip()]
+        sec["private_key"] = "\n".join(lineas) + "\n"
             
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
