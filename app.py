@@ -109,5 +109,7 @@ Reglas:
 # ----------------------------------------------------------------------------
 def obtener_api_key():
     try:
-        return st.secrets["GEMINI_API_KEY"]
-    except Exception:  #
+        key = st.secrets["GEMINI_API_KEY"]
+        return "".join(key.split())
+    except Exception:
+        return None
