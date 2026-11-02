@@ -75,11 +75,27 @@ def escanear(archivo):
 - "descripcion": string con TODOS los productos o servicios comprados (con cantidades si aparecen).
   Si hay devoluciones o notas de crédito, indícalo en la descripción y usa montos negativos.
 Si un dato no aparece, usa "" para texto y 0 para números."""
-    resp = client.models.generate_content(
-        model=MODELO,
-        contents=[types.Part.from_bytes(data=archivo.getvalue(), mime_type=MIME[ext]), prompt],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
+        contenido = [types.Part.from_bytes(data=datos, mime_type=mime), prompt]
+    try:
+        # Razonamiento reducido = respuesta mucho más rápida
+        resp = client.models.generate_content(
+            model=MODELO,
+            contents=contenido,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_level="low"),
+            ),
+        )
+    except Exception as e:
+        if "thinking" in str(e).lower():
+            # Si el modelo no acepta ese ajuste, se intenta sin él
+            resp = client.models.generate_content(
+                model=MODELO,
+                contents=contenido,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+        else:
+            raise
     return json.loads(resp.text)
 
 
