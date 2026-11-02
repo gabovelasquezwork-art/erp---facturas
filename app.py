@@ -94,7 +94,7 @@ else:
                 with st.spinner("Escaneando documento y extrayendo información..."):
                     try:
                         imagen = Image.open(archivo_subido)
-                        model = genai.GenerativeModel('gemini-2.5-flash')
+                        model = genai.GenerativeModel('gemini-3.8-flash')
                         prompt = """
                         Analiza esta factura en detalle y extrae la información exacta en formato JSON puro con estas claves:
                         - "numero_factura": número de la factura (string)
