@@ -116,13 +116,13 @@ def obtener_api_key():
 @st.cache_resource
 def conectar_gsheets():
     try:
-        # Apunta directamente a la sección [gcp_service_account] de tus secretos en Streamlit Cloud
         creds_dict = dict(st.secrets["gcp_service_account"])
-        return gspread.service_account_from_dict(creds_dict)
-    except Exception as e:
-        st.error(f"Detalle técnico del error: {e}")
-        return None
-            
+        # Normaliza los saltos de línea de la llave privada de forma segura
+        if "private_key" in creds_dict:
+            pk = creds_dict["private_key"]
+            if "\\n" in pk:
+                pk = pk.replace("\\n", "\n")
+            creds_dict["private_key"] = pk
         return gspread.service_account_from_dict(creds_dict)
     except Exception as e:
         st.error(f"Detalle técnico del error: {e}")
