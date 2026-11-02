@@ -19,7 +19,7 @@ except Exception as e:
     st.error(f"Falta configurar los secretos en Streamlit: {e}")
     st.stop()
 
-MODELO = "gemini-2.5-flash"
+MODELO = "gemini-3.8-flash"
 CLASIFICACIONES = ["Mantenimiento", "Logística y Montaje", "Insumos Operativos", "Servicios", "Otro"]
 ESTATUS = ["No refacturar", "Refacturar", "Refacturar/herramientas"]
 MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "pdf": "application/pdf"}
