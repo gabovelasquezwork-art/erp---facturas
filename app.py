@@ -1,5 +1,5 @@
 """
-Control de Facturas - Streamlit + Google Gemini
+Control de Facturas - Streamlit + Google Gemini + Google Sheets
 """
 
 import base64
@@ -18,6 +18,8 @@ import google.generativeai as genai
 import pandas as pd
 import streamlit as st
 from pypdf import PdfReader
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -25,7 +27,6 @@ from pypdf import PdfReader
 st.set_page_config(page_title="Control de Facturas", page_icon="🧾", layout="wide")
 
 BASE_DIR = Path(__file__).parent
-ARCHIVO_EXCEL = BASE_DIR / "datos_facturas.xlsx"
 
 MAX_MB = 10
 MAX_PAGINAS = 20
@@ -162,8 +163,23 @@ def pantalla_login():
 
 
 # ----------------------------------------------------------------------------
-# ALMACENAMIENTO (Excel compartido por todo el equipo)
+# ALMACENAMIENTO (Google Sheets)
 # ----------------------------------------------------------------------------
+@st.cache_resource
+def conectar_google_sheets():
+    scopes = [
+        "[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)",
+        "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"
+    ]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(credentials)
+    
+    # ID de tu hoja de Google Sheets
+    SPREADSHEET_ID = "1gBGKVtxVF_jWX8qNF1W26Rm--WniwY-x"
+    return client.open_by_key(SPREADSHEET_ID).sheet1
+
+
 @st.cache_resource
 def obtener_candado() -> threading.Lock:
     return threading.Lock()
@@ -182,37 +198,50 @@ def generar_excel(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-def escribir_excel(df: pd.DataFrame) -> None:
-    temporal = ARCHIVO_EXCEL.with_suffix(".tmp")
-    temporal.write_bytes(generar_excel(df))
-    temporal.replace(ARCHIVO_EXCEL)
-
-
 def cargar_datos() -> pd.DataFrame:
-    if ARCHIVO_EXCEL.exists():
-        df = pd.read_excel(ARCHIVO_EXCEL, dtype=str, engine="openpyxl")
-        for col in COLUMNAS:
-            if col not in df.columns:
-                df[col] = None
-        df = df[COLUMNAS]
-    else:
+    try:
+        sheet = conectar_google_sheets()
+        registros = sheet.get_all_records()
+        df = pd.DataFrame(registros)
+        if df.empty:
+            df = pd.DataFrame(columns=COLUMNAS)
+    except Exception:
         df = pd.DataFrame(columns=COLUMNAS)
+
+    for col in COLUMNAS:
+        if col not in df.columns:
+            df[col] = None
+    df = df[COLUMNAS]
 
     for col in COLUMNAS_TEXTO:
         df[col] = df[col].fillna("").astype(str)
     for col in COLUMNAS_NUMERO:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+        
     opciones = {
         "Clasificación": OPCIONES_CLASIFICACION,
         "Alojamiento": OPCIONES_ALOJAMIENTO,
     }
     for col in COLUMNAS_DESPLEGABLES:
-        serie = df[col].astype(object)
-        valido = serie.isin(opciones[col])
-        df[col] = serie.where(valido, None)
-    sin_id = df["ID"] == ""
-    df.loc[sin_id, "ID"] = [uuid.uuid4().hex[:12] for _ in range(int(sin_id.sum()))]
+        if col in df.columns:
+            serie = df[col].astype(object)
+            valido = serie.isin(opciones[col])
+            df[col] = serie.where(valido, None)
+
+    if "ID" in df.columns:
+        sin_id = (df["ID"] == "") | df["ID"].isna()
+        df.loc[sin_id, "ID"] = [uuid.uuid4().hex[:12] for _ in range(int(sin_id.sum()))]
+    else:
+        df["ID"] = [uuid.uuid4().hex[:12] for _ in range(len(df))]
+
     return df.reset_index(drop=True)
+
+
+def escribir_todas_las_filas(df: pd.DataFrame) -> None:
+    sheet = conectar_google_sheets()
+    sheet.clear()
+    data = [COLUMNAS] + df[COLUMNAS].fillna("").values.tolist()
+    sheet.update(data)
 
 
 def _normalizar(df: pd.DataFrame) -> dict:
@@ -227,28 +256,30 @@ def guardar_cambios(editado: pd.DataFrame, guardado: pd.DataFrame) -> bool:
     if not cambiados:
         return False
     with obtener_candado():
-        disco = cargar_datos().set_index("ID")
-        for i in cambiados:
-            if i in disco.index:
-                for col in COLUMNAS_EDITABLES:
-                    disco.at[i, col] = nuevo[i][col]
-        escribir_excel(disco.reset_index()[COLUMNAS])
+        escribir_todas_las_filas(editado)
     return True
 
 
 def agregar_filas(filas: list[dict]) -> None:
     with obtener_candado():
-        disco = cargar_datos()
-        nuevas = pd.DataFrame(filas, columns=COLUMNAS)
-        for col in COLUMNAS_DESPLEGABLES:
-            nuevas[col] = nuevas[col].astype(object)
-        escribir_excel(pd.concat([disco, nuevas], ignore_index=True)[COLUMNAS])
+        sheet = conectar_google_sheets()
+        try:
+            existing = sheet.get_all_values()
+        except Exception:
+            existing = []
+        if not existing:
+            sheet.append_row(COLUMNAS)
+            
+        for fila in filas:
+            valores = [str(fila.get(c, "")) if fila.get(c) is not None else "" for c in COLUMNAS]
+            sheet.append_row(valores)
 
 
 def eliminar_filas(ids: list[str]) -> None:
     with obtener_candado():
-        disco = cargar_datos()
-        escribir_excel(disco[~disco["ID"].isin(ids)][COLUMNAS])
+        df = cargar_datos()
+        df_filtrado = df[~df["ID"].isin(ids)]
+        escribir_todas_las_filas(df_filtrado)
 
 
 # ----------------------------------------------------------------------------
@@ -300,11 +331,7 @@ def a_numero(valor):
 def obtener_modelo_disponible():
     api_key = obtener_api_key()
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-3.8-flash")
-    api_key = obtener_api_key()
-    genai.configure(api_key=api_key)
     
-    # Buscar automáticamente un modelo flash disponible compatible con contenido multimodal
     try:
         for m in genai.list_models():
             if "generateContent" in m.supported_generation_methods and "flash" in m.name.lower():
@@ -312,14 +339,13 @@ def obtener_modelo_disponible():
     except Exception:
         pass
     
-    # Fallback seguro si falla el listado
     return genai.GenerativeModel("gemini-1.5-flash")
 
 
 def extraer_factura(datos_archivo: bytes, nombre: str, usuario: str) -> dict:
     api_key = obtener_api_key()
     if not api_key:
-        raise ValueError("La API Key de Gemini não está configurada.")
+        raise ValueError("La API Key de Gemini no está configurada.")
 
     model = obtener_modelo_disponible()
 
@@ -461,8 +487,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.caption(
-        "⚠️ Los datos se guardan en el servidor de forma temporal. "
-        "Descarga el Excel con regularidad."
+        "⚠️ Los datos se sincronizan en tiempo real con Google Sheets."
     )
 
 st.title("🧾 Control de Facturas")
