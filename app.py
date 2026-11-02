@@ -116,8 +116,10 @@ def obtener_api_key():
 @st.cache_resource
 def conectar_gsheets():
     try:
-        return gspread.service_account_from_dict(dict(st.secrets["connections"]["gsheets"]))
-    except Exception:
+        creds_dict = dict(st.secrets["connections"]["gsheets"])
+        return gspread.service_account_from_dict(creds_dict)
+    except Exception as e:
+        st.error(f"Detalle técnico del error: {e}")
         return None
 
 # ----------------------------------------------------------------------------
