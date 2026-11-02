@@ -1,4 +1,6 @@
+import io
 import json
+import time
 from datetime import datetime, date
 
 import pandas as pd
@@ -6,15 +8,19 @@ import requests
 import streamlit as st
 from google import genai
 from google.genai import types
+from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Control de Facturas - ERP", page_icon="🧾", layout="wide")
 
-# --- SECRETOS (sin valores por defecto: si faltan, la app se detiene) ---
+# --- SECRETOS ---
 try:
     WEBHOOK_URL = st.secrets["WEBHOOK_URL"]
     WEBHOOK_TOKEN = st.secrets["WEBHOOK_TOKEN"]
     USERS = dict(st.secrets["users"])
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    client = genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(timeout=90000),
+    )
 except Exception as e:
     st.error(f"Falta configurar los secretos en Streamlit: {e}")
     st.stop()
@@ -48,22 +54,28 @@ if st.sidebar.button("Cerrar Sesión"):
     st.session_state.usuario_actual = ""
     st.rerun()
 
-# --- ESTADO DEL FORMULARIO ---
-DEFAULTS = {
-    "f_numero": "", "f_proveedor": "", "f_rif": "", "f_fecha": date.today(),
-    "f_subtotal": 0.0, "f_iva": 0.0, "f_descripcion": "", "f_alojamiento": "",
-    "f_clasificacion": CLASIFICACIONES[0], "f_estatus": ESTATUS[0],
-}
-if st.session_state.pop("reset_form", False):
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-for k, v in DEFAULTS.items():
-    st.session_state.setdefault(k, v)
+# --- ESTADO ---
+st.session_state.setdefault("lote", None)      # tabla de facturas escaneadas
+st.session_state.setdefault("up_key", 0)       # para vaciar el cargador de archivos
+st.session_state.setdefault("ed_key", 0)       # para reiniciar el editor de la tabla
+st.session_state.setdefault("resumen", None)   # mensaje tras guardar
 
 
 # --- FUNCIONES ---
 def escanear(archivo):
     ext = archivo.name.rsplit(".", 1)[-1].lower()
+    datos = archivo.getvalue()
+    mime = MIME[ext]
+
+    # Si es imagen, se reduce para que se procese más rápido
+    if ext != "pdf":
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(datos))).convert("RGB")
+        img.thumbnail((1800, 1800))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        datos = buf.getvalue()
+        mime = "image/jpeg"
+
     prompt = """Analiza esta factura y extrae los datos en JSON con estas claves exactas:
 - "numero_factura": string
 - "proveedor": string (nombre del comercio o proveedor)
@@ -75,7 +87,8 @@ def escanear(archivo):
 - "descripcion": string con TODOS los productos o servicios comprados (con cantidades si aparecen).
   Si hay devoluciones o notas de crédito, indícalo en la descripción y usa montos negativos.
 Si un dato no aparece, usa "" para texto y 0 para números."""
-        contenido = [types.Part.from_bytes(data=datos, mime_type=mime), prompt]
+
+    contenido = [types.Part.from_bytes(data=datos, mime_type=mime), prompt]
     try:
         # Razonamiento reducido = respuesta mucho más rápida
         resp = client.models.generate_content(
@@ -116,106 +129,191 @@ def guardar(payload):
     return r.json().get("ok", False)
 
 
+def txt(v):
+    return "" if v is None or pd.isna(v) else str(v).strip()
+
+
+def num(v):
+    try:
+        return 0.0 if v is None or pd.isna(v) else float(v)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def fecha_txt(v):
+    try:
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    except Exception:
+        return date.today().strftime("%Y-%m-%d")
+
+
+def fecha_obj(v):
+    try:
+        return datetime.strptime(str(v), "%Y-%m-%d").date()
+    except ValueError:
+        return date.today()
+
+
 st.title("🧾 Control de Facturas y Gastos")
-tab_cargar, tab_hist = st.tabs(["📤 Cargar factura", "📚 Histórico"])
+tab_cargar, tab_hist = st.tabs(["📤 Cargar facturas", "📚 Histórico"])
 
 # =============== TAB CARGAR ===============
 with tab_cargar:
-    archivo = st.file_uploader("Sube la factura (JPG, PNG o PDF)", type=list(MIME.keys()))
+    if st.session_state.resumen:
+        tipo, msg = st.session_state.resumen
+        (st.success if tipo == "ok" else st.warning)(msg)
+        st.session_state.resumen = None
 
-    if archivo is not None:
-        c_img, c_btn = st.columns([1, 2])
-        with c_img:
-            if archivo.name.lower().endswith("pdf"):
-                st.info(f"📄 {archivo.name}")
+    archivos = st.file_uploader(
+        "Sube una o varias facturas (JPG, PNG o PDF)",
+        type=list(MIME.keys()),
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.up_key}",
+    )
+
+    if archivos:
+        st.caption(f"{len(archivos)} archivo(s) listo(s) para escanear.")
+        if st.button("🚀 Escanear todas las facturas", type="primary"):
+            filas, errores = [], []
+            barra = st.progress(0.0, text="Iniciando...")
+            for i, a in enumerate(archivos):
+                barra.progress(i / len(archivos), text=f"Escaneando {i + 1} de {len(archivos)}: {a.name}")
+                try:
+                    r = escanear(a)
+                    filas.append({
+                        "archivo": a.name,
+                        "numero_factura": txt(r.get("numero_factura")),
+                        "proveedor": txt(r.get("proveedor")),
+                        "rif": txt(r.get("rif")),
+                        "fecha": fecha_obj(r.get("fecha")),
+                        "descripcion": txt(r.get("descripcion")),
+                        "subtotal": num(r.get("subtotal")),
+                        "iva": num(r.get("iva")),
+                        "alojamiento": "",
+                        "clasificacion": CLASIFICACIONES[0],
+                        "estatus": ESTATUS[0],
+                    })
+                except Exception as e:
+                    errores.append(f"{a.name}: {e}")
+                    filas.append({
+                        "archivo": a.name, "numero_factura": "", "proveedor": "", "rif": "",
+                        "fecha": date.today(), "descripcion": "", "subtotal": 0.0, "iva": 0.0,
+                        "alojamiento": "", "clasificacion": CLASIFICACIONES[0], "estatus": ESTATUS[0],
+                    })
+            barra.progress(1.0, text="Escaneo terminado")
+            st.session_state.lote = pd.DataFrame(filas)
+            st.session_state.ed_key += 1
+            if errores:
+                st.warning("No se pudieron leer estas facturas (llénalas a mano o bórralas de la tabla):\n\n"
+                           + "\n\n".join(errores))
             else:
-                st.image(archivo, width=250)
-        with c_btn:
-            if st.button("🚀 Escanear y llenar matriz", type="primary"):
-                with st.spinner("Escaneando..."):
-                    try:
-                        r = escanear(archivo)
-                        try:
-                            fecha = datetime.strptime(str(r.get("fecha", "")), "%Y-%m-%d").date()
-                        except ValueError:
-                            fecha = date.today()
-                        st.session_state.f_numero = str(r.get("numero_factura") or "")
-                        st.session_state.f_proveedor = str(r.get("proveedor") or "")
-                        st.session_state.f_rif = str(r.get("rif") or "")
-                        st.session_state.f_fecha = fecha
-                        st.session_state.f_subtotal = float(r.get("subtotal") or 0)
-                        st.session_state.f_iva = float(r.get("iva") or 0)
-                        st.session_state.f_descripcion = str(r.get("descripcion") or "")
-                        st.success("Escaneo listo. Revisa los campos antes de guardar.")
-                    except Exception as e:
-                        st.error(f"Error al escanear: {e}")
+                st.success("Escaneo listo. Revisa la tabla antes de guardar.")
 
-    st.markdown("---")
-    st.subheader("📋 Matriz de datos")
+    lote = st.session_state.lote
+    if lote is not None and len(lote) > 0:
+        st.markdown("---")
+        st.subheader("📋 Matriz de facturas escaneadas")
+        st.write("Edita cualquier celda. Completa **Alojamiento** y **Estatus**. "
+                 "Para borrar una fila, selecciónala a la izquierda y pulsa Suprimir.")
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.text_input("Número de Factura", key="f_numero")
-        st.text_input("Proveedor", key="f_proveedor")
-        st.text_input("RIF / Identificación", key="f_rif")
-        st.text_input("Alojamiento", key="f_alojamiento", placeholder="Ej. Apto 3B, Villa Sol...")
-    with c2:
-        st.date_input("Fecha de Emisión", key="f_fecha")
-        st.selectbox("Clasificación del Gasto", CLASIFICACIONES, key="f_clasificacion")
-        st.selectbox("Estatus", ESTATUS, key="f_estatus")
-    with c3:
-        st.number_input("Subtotal", key="f_subtotal", format="%.2f", step=1.0)
-        st.number_input("IVA", key="f_iva", format="%.2f", step=1.0)
-        total = st.session_state.f_subtotal + st.session_state.f_iva
-        st.metric("Total", f"${total:,.2f}")
+        editado = st.data_editor(
+            lote,
+            key=f"editor_{st.session_state.ed_key}",
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            disabled=["archivo"],
+            column_config={
+                "archivo": st.column_config.TextColumn("Archivo"),
+                "numero_factura": st.column_config.TextColumn("Nº Factura"),
+                "proveedor": st.column_config.TextColumn("Proveedor"),
+                "rif": st.column_config.TextColumn("RIF"),
+                "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD"),
+                "descripcion": st.column_config.TextColumn("Descripción", width="large"),
+                "subtotal": st.column_config.NumberColumn("Subtotal", format="%.2f", step=0.01),
+                "iva": st.column_config.NumberColumn("IVA", format="%.2f", step=0.01),
+                "alojamiento": st.column_config.TextColumn("Alojamiento"),
+                "clasificacion": st.column_config.SelectboxColumn("Clasificación", options=CLASIFICACIONES),
+                "estatus": st.column_config.SelectboxColumn("Estatus", options=ESTATUS),
+            },
+        )
 
-    st.text_area("Descripción (todo lo comprado o devuelto)", key="f_descripcion", height=120)
+        total_lote = sum(num(s) + num(i) for s, i in zip(editado["subtotal"], editado["iva"]))
+        m1, m2 = st.columns(2)
+        m1.metric("Facturas en la tabla", len(editado))
+        m2.metric("Total del lote", f"${total_lote:,.2f}")
 
-    if st.button("💾 Guardar en Google Sheets", type="primary"):
-        ss = st.session_state
-        if not ss.f_numero.strip() or not ss.f_proveedor.strip():
-            st.warning("El Número de Factura y el Proveedor son obligatorios.")
-        else:
-            duplicada = False
+        if st.button("💾 Guardar todas en Google Sheets", type="primary"):
             try:
                 h = cargar_historial()
+                existentes = set()
                 if not h.empty:
-                    duplicada = ((h["numero_factura"].astype(str) == ss.f_numero.strip()) &
-                                 (h["proveedor"].astype(str).str.lower() == ss.f_proveedor.strip().lower())).any()
+                    existentes = set(zip(h["numero_factura"].astype(str).str.strip(),
+                                         h["proveedor"].astype(str).str.strip().str.lower()))
             except Exception:
-                pass
-            if duplicada:
-                st.warning("⚠️ Ya existe una factura con ese número y proveedor. No se guardó.")
+                existentes = set()
+
+            guardadas, duplicadas, incompletas, fallidas = 0, [], [], []
+            conservar = []
+            base_id = int(time.time() * 1000)
+
+            with st.spinner("Guardando..."):
+                for n, (idx, row) in enumerate(editado.iterrows()):
+                    numero, prov = txt(row["numero_factura"]), txt(row["proveedor"])
+                    if not numero or not prov:
+                        incompletas.append(txt(row["archivo"]) or f"fila {n + 1}")
+                        conservar.append(idx)
+                        continue
+                    clave = (numero, prov.lower())
+                    if clave in existentes:
+                        duplicadas.append(f"{numero} ({prov})")
+                        continue
+                    payload = {
+                        "id": f"FAC-{base_id}-{n}",
+                        "fecha_carga": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "cargado_por": st.session_state.usuario_actual,
+                        "archivo": txt(row["archivo"]) or "N/A",
+                        "fecha": fecha_txt(row["fecha"]),
+                        "numero_factura": numero,
+                        "proveedor": prov,
+                        "rif": txt(row["rif"]),
+                        "descripcion": txt(row["descripcion"]),
+                        "subtotal": num(row["subtotal"]),
+                        "iva": num(row["iva"]),
+                        "total": num(row["subtotal"]) + num(row["iva"]),
+                        "clasificacion": txt(row["clasificacion"]) or CLASIFICACIONES[0],
+                        "alojamiento": txt(row["alojamiento"]),
+                        "estatus": txt(row["estatus"]) or ESTATUS[0],
+                    }
+                    try:
+                        if guardar(payload):
+                            guardadas += 1
+                            existentes.add(clave)
+                        else:
+                            fallidas.append(numero)
+                            conservar.append(idx)
+                    except Exception:
+                        fallidas.append(numero)
+                        conservar.append(idx)
+
+            cargar_historial.clear()
+
+            partes = [f"✅ Guardadas: {guardadas}"]
+            if duplicadas:
+                partes.append(f"⚠️ Omitidas por duplicadas: {', '.join(duplicadas)}")
+            if incompletas:
+                partes.append(f"⚠️ Faltan Nº de factura o proveedor: {', '.join(incompletas)} (siguen en la tabla)")
+            if fallidas:
+                partes.append(f"❌ Error al guardar: {', '.join(fallidas)} (siguen en la tabla)")
+            st.session_state.resumen = ("ok" if len(partes) == 1 else "warn", "\n\n".join(partes))
+
+            if conservar:
+                st.session_state.lote = editado.loc[conservar].reset_index(drop=True)
             else:
-                payload = {
-                    "id": f"FAC-{int(datetime.now().timestamp())}",
-                    "fecha_carga": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "cargado_por": ss.usuario_actual,
-                    "archivo": archivo.name if archivo else "N/A",
-                    "fecha": str(ss.f_fecha),
-                    "numero_factura": ss.f_numero.strip(),
-                    "proveedor": ss.f_proveedor.strip(),
-                    "rif": ss.f_rif.strip(),
-                    "descripcion": ss.f_descripcion,
-                    "subtotal": ss.f_subtotal,
-                    "iva": ss.f_iva,
-                    "total": total,
-                    "clasificacion": ss.f_clasificacion,
-                    "alojamiento": ss.f_alojamiento.strip(),
-                    "estatus": ss.f_estatus,
-                }
-                try:
-                    with st.spinner("Guardando..."):
-                        ok = guardar(payload)
-                    if ok:
-                        cargar_historial.clear()
-                        st.session_state.reset_form = True
-                        st.toast("Factura guardada ✅")
-                        st.rerun()
-                    else:
-                        st.error("El servidor rechazó el guardado (revisa el token).")
-                except Exception as e:
-                    st.error(f"Error de conexión: {e}")
+                st.session_state.lote = None
+                st.session_state.up_key += 1   # vacía el cargador de archivos
+            st.session_state.ed_key += 1
+            st.rerun()
 
 # =============== TAB HISTÓRICO ===============
 with tab_hist:
