@@ -3,3 +3,4 @@ pandas
 openpyxl
 pypdf
 google-generativeai
+gspread
