@@ -33,10 +33,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
 .stTabs [data-baseweb="tab"] { border-radius: 10px; padding: 8px 16px; font-weight: 600; }
 .stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 600; }
-.card {
-    background: rgba(128,128,128,0.08); border: 1px solid rgba(128,128,128,0.18);
-    padding: 16px 18px; border-radius: 14px; margin-bottom: 10px;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,6 +48,7 @@ except Exception as e:
 CLASIFICACIONES = ["Mantenimiento", "Logística y Montaje", "Insumos Operativos", "Servicios", "Personal", "Otro"]
 ESTATUS = ["No refacturar", "Refacturar", "Refacturar/herramientas", "Gasto personal"]
 DESC_ESTATUS = ["Refacturar/herramientas", "Gasto personal"]   # se descuentan al trabajador
+REFAC_ESTATUS = ["Refacturar", "Refacturar/herramientas"]      # van a la pestaña Avisos
 TIPOS = ["Compra", "Devolución"]
 SIN_ASIGNAR = "Sin asignar"
 
@@ -151,7 +148,7 @@ COLUMNAS = ["id", "fecha", "numero_factura", "proveedor", "rif", "hojas", "tipo"
             "creado_por", "creada", "versiones"]
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cargar():
     """Lee el Sheet y devuelve la última versión de cada factura (sin las anuladas)."""
     r = requests.get(WEBHOOK_URL, params={"token": WEBHOOK_TOKEN}, timeout=30)
@@ -216,6 +213,8 @@ def cargar():
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
     df["es_desc"] = df["estatus"].isin(DESC_ESTATUS)
     df["gasto_aloj"] = df["total"] - df["monto_descuento"].where(df["es_desc"], 0)
+    # Monto neto a refacturar: en "Refacturar/herramientas" se resta la parte personal
+    df["a_refacturar"] = df["total"] - df["monto_descuento"].where(df["estatus"] == "Refacturar/herramientas", 0)
     df["aloj_vista"] = df["alojamiento"].replace("", SIN_ASIGNAR)
     return df.sort_values("fecha", ascending=False, na_position="last").reset_index(drop=True)
 
@@ -283,6 +282,7 @@ def firma(r):
 
 def aplicar_cambios(editado, columnas):
     """Compara la tabla editada con lo guardado y envía solo las filas que cambiaron."""
+    cargar.clear()
     activos = cargar()
     base = activos.set_index("id")
     guardadas, anuladas, errores = 0, 0, []
@@ -330,7 +330,7 @@ def a_excel(df):
     out["avisado"] = out["avisado"].map({True: "Sí", False: "No"})
     cols = [c for c in COLUMNAS if c not in ("versiones",)]
     por_aloj = (df.groupby("aloj_vista")
-                .agg(Facturas=("id", "count"), Total=("total", "sum"), Gasto_alojamiento=("gasto_aloj", "sum"))
+                .agg(Facturas=("id", "count"), Total_tarjeta=("total", "sum"), Gasto_alojamiento=("gasto_aloj", "sum"))
                 .reset_index().rename(columns={"aloj_vista": "Alojamiento"}))
     dp = df[df["es_desc"]].copy()
     dp["trabajador"] = dp["trabajador"].replace("", SIN_ASIGNAR)
@@ -342,14 +342,16 @@ def a_excel(df):
                 "Pendiente": g.loc[~g["descontado"], "monto_descuento"].sum()}), include_groups=False)
             .reset_index().rename(columns={"trabajador": "Trabajador"})) if not dp.empty else \
         pd.DataFrame(columns=["Trabajador", "Facturas", "Total a descontar", "Ya descontado", "Pendiente"])
-    rf = df[df["estatus"] == "Refacturar"].copy()
+    rf = df[df["estatus"].isin(REFAC_ESTATUS)].copy()
     para_ref = pd.DataFrame({
         "Alojamiento": rf["aloj_vista"],
         "Fecha": pd.to_datetime(rf["fecha"]).dt.strftime("%Y-%m-%d"),
         "Nº Factura": rf["numero_factura"],
         "Proveedor": rf["proveedor"],
+        "Estatus": rf["estatus"],
         "Descripción": rf["descripcion"],
-        "Total": rf["total"],
+        "Total factura": rf["total"],
+        "A refacturar (neto)": rf["a_refacturar"],
         "Avisado": rf["avisado"].map({True: "Sí", False: "No"}),
         "Fecha de aviso": rf["fecha_aviso"],
     }).sort_values(["Alojamiento", "Fecha"])
@@ -387,6 +389,16 @@ def dinero(x):
     return f"${x:,.2f}"
 
 
+def combo(label, opciones, key, placeholder):
+    """Lista desplegable donde también se puede escribir un valor nuevo."""
+    try:
+        v = st.selectbox(label, list(opciones), index=None, accept_new_options=True,
+                         placeholder=placeholder, key=key)
+    except TypeError:   # versión vieja de Streamlit: campo de texto simple
+        v = st.text_input(label, key=key, placeholder=placeholder)
+    return txt(v)
+
+
 # ============================== BARRA LATERAL ==============================
 st.sidebar.markdown(f"### 👤 {USUARIO}")
 if st.sidebar.button("🔄 Actualizar datos", use_container_width=True):
@@ -396,7 +408,8 @@ if st.sidebar.button("Cerrar sesión", use_container_width=True):
     st.session_state.autenticado = False
     st.session_state.usuario_actual = ""
     st.rerun()
-st.sidebar.caption("Tus datos viven en Google Sheets: cerrar sesión no borra nada.")
+st.sidebar.caption("Tus datos viven en Google Sheets: cerrar sesión no borra nada. "
+                   "Si otra persona carga facturas, pulsa Actualizar datos para verlas.")
 
 # ============================== CARGA DE DATOS ==============================
 try:
@@ -430,25 +443,27 @@ with tab_panel:
 
         hoy = pd.Timestamp.today()
         per_hoy = hoy.to_period("M")
-        mes_act = df.loc[df["fecha"].dt.to_period("M") == per_hoy, "gasto_aloj"].sum()
-        mes_ant = df.loc[df["fecha"].dt.to_period("M") == per_hoy - 1, "gasto_aloj"].sum()
-        por_avisar = d[(d["estatus"] == "Refacturar") & (~d["avisado"])]
+        mes_act = df.loc[df["fecha"].dt.to_period("M") == per_hoy, "total"].sum()
+        mes_ant = df.loc[df["fecha"].dt.to_period("M") == per_hoy - 1, "total"].sum()
+        por_avisar = d[d["estatus"].isin(REFAC_ESTATUS) & (~d["avisado"])]
 
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Gasto del mes", dinero(mes_act), delta=f"{mes_act - mes_ant:+,.2f} vs mes anterior",
-                  delta_color="inverse")
-        k2.metric("Gasto en alojamientos", dinero(d["gasto_aloj"].sum()), help="No incluye lo que se descuenta al personal.")
-        k3.metric("Por avisar (refacturar)", dinero(por_avisar["total"].sum()),
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Tarjeta del mes", dinero(mes_act), delta=f"{mes_act - mes_ant:+,.2f} vs mes anterior",
+                  delta_color="inverse", help="Todas las facturas del mes, sin importar el estatus.")
+        k2.metric("Gasto total (tarjeta)", dinero(d["total"].sum()))
+        k3.metric("Gasto en alojamientos", dinero(d["gasto_aloj"].sum()),
+                  help="No incluye lo que se descuenta al personal.")
+        k4.metric("Por avisar (refacturar)", dinero(por_avisar["a_refacturar"].sum()),
                   delta=f"{len(por_avisar)} factura(s)", delta_color="off")
-        k4.metric("Devoluciones", dinero(d.loc[d["tipo"] == "Devolución", "total"].abs().sum()))
-        k5.metric("Por descontar al personal",
+        k5.metric("Devoluciones", dinero(d.loc[d["tipo"] == "Devolución", "total"].abs().sum()))
+        k6.metric("Por descontar al personal",
                   dinero(d.loc[d["es_desc"] & ~d["descontado"], "monto_descuento"].sum()))
         st.caption(f"{len(d)} factura(s) en el periodo seleccionado.")
 
         # Alertas
         if not por_avisar.empty:
-            st.warning(f"📣 Tienes {len(por_avisar)} factura(s) pendientes de avisar para refacturar, por "
-                       f"{dinero(por_avisar['total'].sum())}. Ve a la pestaña **Avisos**.")
+            st.warning(f"📣 Tienes {len(por_avisar)} factura(s) pendientes de avisar para refacturar. "
+                       f"Ve a la pestaña **Avisos**.")
         compras = df[df["tipo"] == "Compra"].copy()
         if not compras.empty:
             med = compras.groupby("proveedor")["total"].transform("median")
@@ -473,10 +488,10 @@ with tab_panel:
                     tooltip=[alt.Tooltip("aloj_vista:N", title="Alojamiento"),
                              alt.Tooltip("gasto_aloj:Q", title="Gasto", format=",.2f")]), theme=None)
         with g2:
-            st.markdown("**Tendencia mensual**")
+            st.markdown("**Tendencia mensual (tarjeta)**")
             m = d.dropna(subset=["fecha"]).copy()
             m["mes"] = m["fecha"].dt.to_period("M").astype(str)
-            m = m.groupby("mes", as_index=False)["gasto_aloj"].sum()
+            m = m.groupby("mes", as_index=False)["total"].sum()
             if m.empty:
                 st.caption("Sin datos.")
             else:
@@ -486,9 +501,9 @@ with tab_panel:
                                                   alt.GradientStop(color="rgba(124,58,237,0.05)", offset=1)],
                         x1=1, x2=1, y1=1, y2=0), point=True).encode(
                     x=alt.X("mes:N", title=None),
-                    y=alt.Y("gasto_aloj:Q", title=None),
+                    y=alt.Y("total:Q", title=None),
                     tooltip=[alt.Tooltip("mes:N", title="Mes"),
-                             alt.Tooltip("gasto_aloj:Q", title="Gasto", format=",.2f")]), theme=None)
+                             alt.Tooltip("total:Q", title="Total", format=",.2f")]), theme=None)
 
         g3, g4 = st.columns(2)
         with g3:
@@ -517,134 +532,95 @@ with tab_panel:
                              alt.Tooltip("total:Q", title="Total", format=",.2f")]), theme=None)
 
 # ============================== NUEVA FACTURA ==============================
-NUEVO = "➕ Nuevo..."
-SEL = "— Seleccionar —"
-FORM_DEFAULTS = {
-    "n_fecha": date.today(), "n_num": "", "n_prov_sel": SEL, "n_prov_new": "", "n_rif": "",
-    "n_hojas": 1, "n_tipo": TIPOS[0], "n_desc": "", "n_sub": 0.0, "n_ivamodo": "16%", "n_ivaman": 0.0,
-    "n_clas": CLASIFICACIONES[0], "n_aloj_sel": SEL, "n_aloj_new": "", "n_est": ESTATUS[0],
-    "n_trab_sel": SEL, "n_trab_new": "", "n_mdesc": 0.0,
-}
-
-
-def al_cambiar_proveedor():
-    prov = st.session_state.get("n_prov_sel")
-    if prov and prov not in (SEL, NUEVO):
-        previas = cargar()
-        previas = previas[previas["proveedor"] == prov]
-        if not previas.empty:
-            st.session_state.n_rif = previas.iloc[0]["rif"]
-            st.session_state.n_clas = previas.iloc[0]["clasificacion"] if previas.iloc[0]["clasificacion"] in CLASIFICACIONES else CLASIFICACIONES[0]
-
-
-def elegir(label, existentes, clave_sel, clave_new):
-    opciones = [SEL] + list(existentes) + [NUEVO]
-    sel = st.selectbox(label, opciones, key=clave_sel)
-    if sel == NUEVO:
-        return st.text_input(f"Nombre nuevo ({label.lower()})", key=clave_new).strip()
-    return "" if sel == SEL else sel
-
-
+st.session_state.setdefault("nf_key", 0)
 with tab_nueva:
-    if st.session_state.pop("reset_form", False):
-        for k, v in FORM_DEFAULTS.items():
-            st.session_state[k] = v
-    for k, v in FORM_DEFAULTS.items():
-        st.session_state.setdefault(k, v)
-
     if st.session_state.get("aviso_guardado"):
         st.success(st.session_state.pop("aviso_guardado"))
 
     st.markdown("#### Registrar factura")
-    st.caption("Una factura con muchas hojas va en **una sola fila**: indica el número de hojas y describe todo lo comprado.")
+    st.caption("Escribe los datos y pulsa **Guardar**. Una factura con muchas hojas va en **una sola fila**: "
+               "indica el número de hojas y describe todo lo comprado.")
 
-    ca, cb, cc = st.columns(3)
-    with ca:
-        st.date_input("Fecha de emisión", key="n_fecha")
-        st.text_input("Número de factura", key="n_num")
-        st.number_input("Nº de hojas", min_value=1, step=1, key="n_hojas")
-        st.selectbox("Tipo", TIPOS, key="n_tipo")
-    with cb:
-        sel_prov = st.selectbox("Proveedor", [SEL] + proveedores + [NUEVO], key="n_prov_sel",
-                                on_change=al_cambiar_proveedor)
-        proveedor = (st.text_input("Nombre del proveedor nuevo", key="n_prov_new").strip()
-                     if sel_prov == NUEVO else ("" if sel_prov == SEL else sel_prov))
-        st.text_input("RIF / Identificación", key="n_rif")
-        alojamiento = elegir("Alojamiento", alojamientos, "n_aloj_sel", "n_aloj_new")
-        st.selectbox("Clasificación del gasto", CLASIFICACIONES, key="n_clas")
-    with cc:
-        st.number_input("Subtotal", min_value=0.0, step=1.0, format="%.2f", key="n_sub")
-        st.selectbox("IVA", ["16%", "8%", "Exento (0%)", "Manual"], key="n_ivamodo")
-        pct = {"16%": 0.16, "8%": 0.08, "Exento (0%)": 0.0}
-        if st.session_state.n_ivamodo == "Manual":
-            iva = st.number_input("Monto del IVA", min_value=0.0, step=1.0, format="%.2f", key="n_ivaman")
-        else:
-            iva = round(st.session_state.n_sub * pct[st.session_state.n_ivamodo], 2)
-        st.selectbox("Estatus", ESTATUS, key="n_est",
-                     help="Refacturar = queda en la pestaña Avisos. "
-                          "Refacturar/herramientas y Gasto personal = se descuentan al trabajador.")
+    k = st.session_state.nf_key
+    with st.form(f"form_nueva_{k}"):
+        ca, cb, cc = st.columns(3)
+        with ca:
+            n_fecha = st.date_input("Fecha de emisión", value=date.today(), key=f"n_fecha_{k}")
+            n_num = st.text_input("Número de factura", key=f"n_num_{k}")
+            n_hojas = st.number_input("Nº de hojas", min_value=1, step=1, value=1, key=f"n_hojas_{k}")
+            n_tipo = st.selectbox("Tipo", TIPOS, key=f"n_tipo_{k}")
+        with cb:
+            n_prov = combo("Proveedor", proveedores, f"n_prov_{k}", "Escribe o elige un proveedor")
+            n_rif = st.text_input("RIF / Identificación", key=f"n_rif_{k}",
+                                  help="Si lo dejas vacío y el proveedor ya existe, se completa solo.")
+            n_aloj = combo("Alojamiento", alojamientos, f"n_aloj_{k}", "Escribe o elige un alojamiento")
+            n_clas = st.selectbox("Clasificación del gasto", CLASIFICACIONES, key=f"n_clas_{k}")
+        with cc:
+            n_sub = st.number_input("Subtotal", min_value=0.0, step=1.0, format="%.2f", key=f"n_sub_{k}")
+            n_ivamodo = st.selectbox("IVA", ["16%", "8%", "Exento (0%)", "Manual"], key=f"n_ivamodo_{k}")
+            n_ivaman = st.number_input("Monto del IVA (solo si elegiste Manual)", min_value=0.0, step=1.0,
+                                       format="%.2f", key=f"n_ivaman_{k}")
+            n_est = st.selectbox("Estatus", ESTATUS, key=f"n_est_{k}")
 
-    signo = -1 if st.session_state.n_tipo == "Devolución" else 1
-    sub = st.session_state.n_sub
-    total = signo * round(sub + iva, 2)
-
-    trabajador, monto_desc = "", 0.0
-    es_desc = st.session_state.n_est in DESC_ESTATUS
-    if es_desc:
-        st.markdown("##### 👷 Descuento al trabajador")
+        st.markdown("##### 👷 Trabajador (solo para Refacturar/herramientas y Gasto personal)")
         t1, t2 = st.columns(2)
         with t1:
-            trabajador = elegir("Trabajador", trabajadores, "n_trab_sel", "n_trab_new")
+            n_trab = combo("Trabajador", trabajadores, f"n_trab_{k}", "Escribe o elige un trabajador")
         with t2:
-            st.number_input("Monto personal a descontar (0 = toda la factura)", min_value=0.0, step=1.0,
-                            format="%.2f", key="n_mdesc")
-            md = st.session_state.n_mdesc
-            monto_desc = signo * (md if md > 0 else round(sub + iva, 2))
-            st.caption(f"Se descontarán {dinero(monto_desc)} al trabajador. "
-                       f"El resto ({dinero(total - monto_desc)}) cuenta como gasto del alojamiento.")
+            n_mdesc = st.number_input("Monto personal a descontar (0 = toda la factura)", min_value=0.0,
+                                      step=1.0, format="%.2f", key=f"n_mdesc_{k}")
 
-    st.text_area("Descripción (todo lo comprado o devuelto)", key="n_desc", height=110)
+        n_desc = st.text_area("Descripción (todo lo comprado o devuelto)", key=f"n_desc_{k}", height=110)
+        guardar = st.form_submit_button("💾 Guardar factura", type="primary", use_container_width=True)
 
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Subtotal", dinero(signo * sub))
-    r2.metric("IVA", dinero(signo * iva))
-    r3.metric("Total", dinero(total))
-
-    num_f = st.session_state.n_num.strip()
-    dup = hay_duplicado(df, num_f, proveedor, st.session_state.n_rif) if num_f and proveedor else None
-    if dup is not None:
-        st.error(f"⛔ Factura repetida: ya existe la nº {dup['numero_factura']} de {dup['proveedor']} "
-                 f"({fecha_corta(dup['fecha'])}). No se puede guardar de nuevo.")
-
-    if st.button("💾 Guardar factura", type="primary", use_container_width=True, disabled=dup is not None):
-        if not num_f or not proveedor:
+    if guardar:
+        num_f = n_num.strip()
+        es_desc = n_est in DESC_ESTATUS
+        if not num_f or not n_prov:
             st.warning("El número de factura y el proveedor son obligatorios.")
-        elif es_desc and not trabajador:
+        elif es_desc and not n_trab:
             st.warning("Indica el trabajador al que se le descontará.")
         else:
-            rec = {
-                "id": f"FAC-{int(time.time() * 1000)}",
-                "fecha": st.session_state.n_fecha, "numero_factura": num_f, "proveedor": proveedor,
-                "rif": st.session_state.n_rif.strip(), "hojas": st.session_state.n_hojas,
-                "tipo": st.session_state.n_tipo, "descripcion": st.session_state.n_desc,
-                "subtotal": signo * sub, "iva": signo * iva, "clasificacion": st.session_state.n_clas,
-                "alojamiento": alojamiento, "estatus": st.session_state.n_est,
-                "trabajador": trabajador, "monto_descuento": monto_desc, "descontado": False,
-                "avisado": False, "fecha_aviso": "",
-                "creado_por": USUARIO, "creada": date.today().strftime("%Y-%m-%d"),
-            }
-            try:
-                with st.spinner("Guardando..."):
-                    ok = enviar(rec)
-                if ok:
-                    cargar.clear()
-                    st.session_state.reset_form = True
-                    st.session_state.aviso_guardado = f"✅ Factura {num_f} guardada correctamente."
-                    st.rerun()
-                else:
-                    st.error("El servidor rechazó el guardado (revisa que el token coincida).")
-            except Exception as e:
-                st.error(f"Error de conexión: {e}")
+            cargar.clear()
+            actual = cargar()
+            rif = n_rif.strip()
+            if not rif:
+                prev = actual[(actual["proveedor"].str.lower() == n_prov.lower()) & (actual["rif"] != "")]
+                if not prev.empty:
+                    rif = prev.iloc[0]["rif"]
+            dup = hay_duplicado(actual, num_f, n_prov, rif)
+            if dup is not None:
+                st.error(f"⛔ Factura repetida: ya existe la nº {dup['numero_factura']} de {dup['proveedor']} "
+                         f"({fecha_corta(dup['fecha'])}). No se guardó.")
+            else:
+                pct = {"16%": 0.16, "8%": 0.08, "Exento (0%)": 0.0}
+                iva = n_ivaman if n_ivamodo == "Manual" else round(n_sub * pct[n_ivamodo], 2)
+                signo = -1 if n_tipo == "Devolución" else 1
+                total = signo * round(n_sub + iva, 2)
+                monto_desc = signo * (n_mdesc if n_mdesc > 0 else round(n_sub + iva, 2)) if es_desc else 0.0
+                rec = {
+                    "id": f"FAC-{int(time.time() * 1000)}",
+                    "fecha": n_fecha, "numero_factura": num_f, "proveedor": n_prov, "rif": rif,
+                    "hojas": n_hojas, "tipo": n_tipo, "descripcion": n_desc,
+                    "subtotal": signo * n_sub, "iva": signo * iva, "clasificacion": n_clas,
+                    "alojamiento": n_aloj, "estatus": n_est,
+                    "trabajador": n_trab if es_desc else "", "monto_descuento": monto_desc,
+                    "descontado": False, "avisado": False, "fecha_aviso": "",
+                    "creado_por": USUARIO, "creada": date.today().strftime("%Y-%m-%d"),
+                }
+                try:
+                    with st.spinner("Guardando..."):
+                        ok = enviar(rec)
+                    if ok:
+                        cargar.clear()
+                        st.session_state.nf_key += 1
+                        st.session_state.aviso_guardado = (f"✅ Factura {num_f} guardada. "
+                                                           f"Total: {dinero(total)} (IVA {dinero(signo * iva)}).")
+                        st.rerun()
+                    else:
+                        st.error("El servidor rechazó el guardado (revisa que el token coincida).")
+                except Exception as e:
+                    st.error(f"Error de conexión: {e}")
 
 # ============================== FACTURAS ==============================
 st.session_state.setdefault("ed_fact", 0)
@@ -672,7 +648,7 @@ with tab_fact:
 
         m1, m2, m3 = st.columns(3)
         m1.metric("Facturas", len(v))
-        m2.metric("Total", dinero(v["total"].sum()))
+        m2.metric("Total (tarjeta)", dinero(v["total"].sum()))
         m3.metric("Gasto en alojamientos", dinero(v["gasto_aloj"].sum()))
 
         st.caption("Edita cualquier celda y pulsa **Guardar cambios**. Marca **Anular** para retirar una factura.")
@@ -734,19 +710,23 @@ with tab_fact:
 st.session_state.setdefault("ed_avisos", 0)
 with tab_avisos:
     st.markdown("#### Avisos de refacturación")
-    st.caption("Aquí están las facturas con estatus **Refacturar**. Tú avisas; no las refacturas. "
-               "Marca **Avisado** cuando ya hayas informado, y la app guarda la fecha.")
-    rf = df[df["estatus"] == "Refacturar"].copy()
+    st.caption("Aquí están las facturas con estatus **Refacturar** y **Refacturar/herramientas**. "
+               "Tú avisas; no las refacturas. En las de herramientas se muestra cuánto es personal "
+               "(se descuenta al trabajador) y cuánto queda neto por refacturar. "
+               "Marca **Avisado** cuando ya hayas informado y la app guarda la fecha.")
+    rf = df[df["estatus"].isin(REFAC_ESTATUS)].copy()
     if rf.empty:
-        st.info("No hay facturas con estatus Refacturar.")
+        st.info("No hay facturas para refacturar.")
     else:
         pend = rf[~rf["avisado"]].copy()
         hechas = rf[rf["avisado"]].copy()
 
         a1, a2, a3 = st.columns(3)
-        a1.metric("Por avisar", dinero(pend["total"].sum()), delta=f"{len(pend)} factura(s)", delta_color="off")
-        a2.metric("Ya avisadas", dinero(hechas["total"].sum()), delta=f"{len(hechas)} factura(s)", delta_color="off")
-        a3.metric("Total para refacturar", dinero(rf["total"].sum()))
+        a1.metric("Por avisar (neto)", dinero(pend["a_refacturar"].sum()), delta=f"{len(pend)} factura(s)",
+                  delta_color="off")
+        a2.metric("Ya avisadas (neto)", dinero(hechas["a_refacturar"].sum()), delta=f"{len(hechas)} factura(s)",
+                  delta_color="off")
+        a3.metric("Total neto para refacturar", dinero(rf["a_refacturar"].sum()))
 
         if pend.empty:
             st.success("🎉 No tienes avisos pendientes.")
@@ -758,12 +738,13 @@ with tab_avisos:
             if SIN_ASIGNAR in set(pv["aloj_vista"]):
                 st.warning("Hay facturas sin alojamiento. Escríbelo en la tabla antes de avisar.")
 
-            vista_a = pv[["id", "avisado", "fecha", "numero_factura", "proveedor", "alojamiento",
-                          "descripcion", "total"]].copy()
+            vista_a = pv[["id", "avisado", "fecha", "numero_factura", "proveedor", "alojamiento", "estatus",
+                          "descripcion", "total", "monto_descuento", "a_refacturar"]].copy()
             ed_a = st.data_editor(
                 vista_a, key=f"editor_avisos_{st.session_state.ed_avisos}", hide_index=True,
                 use_container_width=True, num_rows="fixed",
-                disabled=["id", "fecha", "numero_factura", "proveedor", "descripcion", "total"],
+                disabled=["id", "fecha", "numero_factura", "proveedor", "estatus", "descripcion", "total",
+                          "monto_descuento", "a_refacturar"],
                 column_config={
                     "id": st.column_config.TextColumn("ID"),
                     "avisado": st.column_config.CheckboxColumn("Avisado"),
@@ -771,21 +752,27 @@ with tab_avisos:
                     "numero_factura": st.column_config.TextColumn("Nº Factura"),
                     "proveedor": st.column_config.TextColumn("Proveedor"),
                     "alojamiento": st.column_config.TextColumn("Alojamiento"),
+                    "estatus": st.column_config.TextColumn("Estatus"),
                     "descripcion": st.column_config.TextColumn("Descripción", width="large"),
-                    "total": st.column_config.NumberColumn("Total", format="%.2f"),
+                    "total": st.column_config.NumberColumn("Total factura", format="%.2f"),
+                    "monto_descuento": st.column_config.NumberColumn("Personal (trabajador)", format="%.2f"),
+                    "a_refacturar": st.column_config.NumberColumn("Neto a refacturar", format="%.2f"),
                 })
 
             st.markdown("**📋 Mensaje listo para copiar**")
             lineas = [f"AVISO DE REFACTURACIÓN - {date.today():%d/%m/%Y}", ""]
             for aloj, g in pv.sort_values("fecha").groupby("aloj_vista"):
-                lineas.append(f"🏠 {aloj} - Total: {dinero(g['total'].sum())}")
+                lineas.append(f"🏠 {aloj} - Neto a refacturar: {dinero(g['a_refacturar'].sum())}")
                 for _, r in g.iterrows():
                     lineas.append(f"  • Fact. {r['numero_factura']} | {r['proveedor']} | "
                                   f"{fecha_corta(r['fecha'])} | {dinero(r['total'])}")
+                    if r["estatus"] == "Refacturar/herramientas" and r["monto_descuento"]:
+                        lineas.append(f"    Herramientas personales (descuento al trabajador): "
+                                      f"{dinero(r['monto_descuento'])} | Neto: {dinero(r['a_refacturar'])}")
                     if r["descripcion"]:
                         lineas.append(f"    {r['descripcion'][:120]}")
                 lineas.append("")
-            lineas.append(f"TOTAL A REFACTURAR: {dinero(pv['total'].sum())}")
+            lineas.append(f"TOTAL NETO A REFACTURAR: {dinero(pv['a_refacturar'].sum())}")
             st.code("\n".join(lineas), language=None)
 
             w1, w2 = st.columns(2)
@@ -809,7 +796,8 @@ with tab_avisos:
         if not hechas.empty:
             with st.expander(f"📁 Ya avisadas ({len(hechas)})"):
                 st.dataframe(hechas[["fecha_aviso", "fecha", "numero_factura", "proveedor", "aloj_vista",
-                                     "descripcion", "total"]].sort_values("fecha_aviso", ascending=False),
+                                     "estatus", "descripcion", "total", "a_refacturar"]]
+                             .sort_values("fecha_aviso", ascending=False),
                              use_container_width=True, hide_index=True)
 
 # ============================== ESTATUS ==============================
@@ -855,8 +843,9 @@ with tab_pers:
     dp = df[df["es_desc"]].copy()
     st.markdown("#### Gastos personales del personal")
     st.caption("Aquí aparecen las facturas con estatus **Refacturar/herramientas** (herramientas personales) "
-               "o **Gasto personal** (comida u otras compras personales). Solo el monto personal se descuenta "
-               "al trabajador; no cuenta como gasto del alojamiento.")
+               "o **Gasto personal** (comida u otras compras personales). Todas salen con la tarjeta de la "
+               "empresa, por eso siguen apareciendo también en **Facturas**, y las de herramientas en **Avisos**. "
+               "Aquí se ve lo que se le descuenta a cada trabajador.")
     if dp.empty:
         st.info("No hay compras personales registradas.")
     else:
