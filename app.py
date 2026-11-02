@@ -116,7 +116,12 @@ def obtener_api_key():
 @st.cache_resource
 def conectar_gsheets():
     try:
-        creds_dict = dict(st.secrets["connections"]["gsheets"])
+        # Si tienes las credenciales guardadas bajo una clave personalizada o directa
+        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+            creds_dict = dict(st.secrets["connections"]["gsheets"])
+        else:
+            # Intenta leerlo directamente de los secretos si lo pegaste plano
+            creds_dict = dict(st.secrets)
         return gspread.service_account_from_dict(creds_dict)
     except Exception as e:
         st.error(f"Detalle técnico del error: {e}")
