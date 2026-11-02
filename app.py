@@ -116,14 +116,31 @@ def obtener_api_key():
 @st.cache_resource
 def conectar_gsheets():
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        # Normaliza los saltos de línea de la llave privada de forma segura
-        if "private_key" in creds_dict:
-            pk = creds_dict["private_key"]
-            if "\\n" in pk:
-                pk = pk.replace("\\n", "\n")
-            creds_dict["private_key"] = pk
-        return gspread.service_account_from_dict(creds_dict)
+        # Cargamos los secretos como un diccionario normal
+        sec = st.secrets["gcp_service_account"]
+        
+        creds_dict = {
+            "type": sec["type"],
+            "project_id": sec["project_id"],
+            "private_key_id": sec["private_key_id"],
+            # Aquí limpiamos y reconstruimos la llave de forma segura garantizando los saltos de línea
+            "private_key": sec["private_key"].replace("\\n", "\n").strip(),
+            "client_email": sec["client_email"],
+            "client_id": sec["client_id"],
+            "auth_uri": sec["auth_uri"],
+            "token_uri": sec["token_uri"],
+            "auth_provider_x509_cert_url": sec["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": sec["client_x509_cert_url"],
+            "universe_domain": sec.get("universe_domain", "googleapis.com")
+        }
+        
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        return gspread.authorize(creds)
     except Exception as e:
         st.error(f"Detalle técnico del error: {e}")
         return None
