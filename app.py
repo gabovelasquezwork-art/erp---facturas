@@ -116,12 +116,12 @@ def obtener_api_key():
 @st.cache_resource
 def conectar_gsheets():
     try:
-        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-            creds_dict = dict(st.secrets["connections"]["gsheets"])
-        elif "gsheets" in st.secrets:
-            creds_dict = dict(st.secrets["gsheets"])
-        else:
-            creds_dict = dict(st.secrets)
+        # Apunta directamente a la sección [gcp_service_account] de tus secretos en Streamlit Cloud
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        return gspread.service_account_from_dict(creds_dict)
+    except Exception as e:
+        st.error(f"Detalle técnico del error: {e}")
+        return None
             
         return gspread.service_account_from_dict(creds_dict)
     except Exception as e:
